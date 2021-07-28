@@ -1,0 +1,354 @@
+---
+title: "Craigslist Rental Explorer Vancouver"
+author: "Austin McGhee"
+date: "7/27/2021"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Code for scraping data from Craigslist
+
+Code is available in rmd.  Too long for pdf/html display.
+
+```{r include=FALSE}
+
+pacman::p_load(tidyverse, rvest)
+pacman::p_load(tidyverse, DataExplorer, ggplot2, data.table, lubridate, plotly, sf, ggmap, maptools, ggthemes, RColorBrewer, kableExtra)
+library(tinytex)
+
+
+# The guide/post that helped put this together can be found here from vishal Chandawarkar - https://medium.com/swlh/exploring-san-francisco-apartments-on-craigslist-with-r-43e5fa38a77b
+
+
+# Query items
+location <- "vancouver" # searching SFBay CraigsList
+searchfield1 <- "-furnished" # many postings were showing up as furnished, this query removes any postings that mention furnished places.
+searchdistance <- 30 # limit search to 4 miles around the below zip code
+min_price <- 1000 # min price
+max_price <- 3000 # max price
+min_bed <- 0 # min beds
+availabilityMode <- 0
+sale_dates <- "all+dates"
+
+#Constructing  Query by concatenating the search items above
+baseurl <- paste0("https://", location, ".craigslist.org/search/apa")
+queries <- c("?")
+queries <- c(queries, paste0("query=", searchfield1))
+queries <- c(queries, paste0("search_distance=", searchdistance))
+queries <- c(queries, paste0("min_price=", min_price))
+queries <- c(queries, paste0("max_price=", max_price))
+queries <- c(queries, paste0("min_bedrooms=", min_bed))
+queries <- c(queries, paste0("availabilityMode=", availabilityMode))
+queries <- c(queries, paste0("laundry=1&laundry=4&laundry=2&laundry=3")) #all but no laundry selections
+queries <- c(queries, paste0("parking=1&parking=2&parking=3&parking=4")) #selections for available parking
+queries <- c(queries, paste0("sale_date=", sale_dates))
+query_url <- paste0(baseurl,queries[1], paste(queries[2:length(queries)], collapse = "&"))
+
+# QUERY CRAIGSLIST
+raw_query <- xml2::read_html(query_url)
+raw_ads <- html_nodes(raw_query, "li.result-row")
+
+# EXTRACT RELEVANT ATTRIBUTES
+ids <- raw_ads %>%
+  html_attr('data-pid')
+
+titles <- raw_ads %>%
+  html_node("a.result-title") %>%
+  html_text()
+
+links <- raw_ads %>% 
+  html_node(".result-title") %>% 
+  html_attr('href')
+
+prices <- raw_ads %>% 
+  html_node("span.result-price") %>%
+  html_text() %>%
+  parse_number()
+
+dates <- raw_ads%>%
+  html_node('time') %>%
+  html_attr('datetime')
+
+locales <- raw_ads %>%
+  html_node(".result-hood") %>%
+  html_text()
+
+bedrooms <- raw_ads %>% 
+  html_node("span.housing") %>% 
+  html_text() %>% 
+  parse_number()
+
+sqft <- raw_ads %>% 
+  html_node("span.housing") %>% 
+  html_text() %>% 
+  gsub(".*-\\s([^.]+)[f][t].*","\\1",.) %>% 
+  as.numeric()
+
+latlongs <- map_dfr(links, function(x){
+  xml2::read_html(x) %>% 
+    html_node("#map") %>%
+    html_attrs() %>%
+    t() %>%
+    as_tibble() %>%
+    select_at(vars(starts_with("data-"))) %>%
+    mutate_all(as.numeric)
+}
+)
+
+# COMBINE INTO DATA FRAME
+craigslist <- data.frame(ids, locales, prices, bedrooms, sqft, dates, titles, latlongs, links) %>% as_tibble()
+
+#Loop for more than 120 results
+loopn <- seq(120, 360, 120)
+
+for(i in loopn){
+  Sys.sleep(5) #delays each query by 5 seconds
+  queriesloop <- queries
+  
+  # ADD OFFSET TO URL IN INTERVALS OF 120
+  queriesloop <- c(queries, paste0("s=", i))
+  query_url <- paste0(baseurl,queriesloop[1], paste(queriesloop[2:length(queriesloop)], collapse = "&"))
+  
+  # The following loop body is going to be repetitive, but important!
+  
+  # QUERY CRAIGSLIST
+  raw_query <- xml2::read_html(query_url)
+  
+  raw_ads <- html_nodes(raw_query, "li.result-row")
+  
+  # EXTRACT ATTRIBUTES
+  ids <- raw_ads %>% html_attr('data-pid')
+  titles <- raw_ads %>% html_node("a.result-title") %>% html_text()
+  links <- raw_ads %>% html_node(".result-title") %>% html_attr('href')
+  prices <- raw_ads %>% html_node("span.result-price") %>% html_text() %>% parse_number()
+  dates <- raw_ads %>% html_node('time') %>% html_attr('datetime')
+  locales <- raw_ads %>% html_node(".result-hood") %>% html_text()
+  bedrooms <- raw_ads %>% html_node("span.housing") %>% html_text() %>% parse_number()
+  sqft <- raw_ads %>% html_node("span.housing") %>% html_text() %>% gsub(".*-\\s([^.]+)[f][t].*","\\1",.) %>% as.numeric()
+  latlongs <- map_dfr(links, function(x){
+    xml2::read_html(x) %>% 
+      html_node("#map") %>%
+      html_attrs() %>%
+      t() %>%
+      as_tibble() %>%
+      select_at(vars(starts_with("data-"))) %>%
+      mutate_all(as.numeric)
+  }
+  )
+  
+  craigslistloop <- data.frame(ids, locales, prices, bedrooms, sqft, dates, titles, latlongs, links) %>% as_tibble()
+  
+  # RBIND POSTS IN EACH LOOP TO THE MASTER CRAIGSLIST DATA FRAME
+  craigslist <- rbind(craigslist, craigslistloop)
+  
+}
+
+#Save/download CSV file
+write_excel_csv(craigslist,"rentaldata.csv")
+
+```
+
+## Now exploring the rental data
+
+Rental dataset from the scrape 
+
+
+```{r pressure, include=FALSE}
+# https://medium.com/swlh/exploring-san-francisco-apartments-on-craigslist-with-r-43e5fa38a77b
+
+#install.packages("pacman")
+
+pacman::p_load(tidyverse, DataExplorer, ggplot2, data.table, lubridate, plotly, sf, ggmap, maptools, ggthemes, RColorBrewer, kableExtra)
+
+# READ DATA
+craigslist <- read_csv("rentaldata.csv")
+
+# UNDERSTAND YOUR DATA STRUCTURE
+str(craigslist)
+
+# REVIEW DATA TAIL IN CASE THERE ARE ANY ISSUES
+craigslist %>% 
+  as.data.table() %>% 
+  tail()
+
+# Note: I review the tail as a data table because the output is much nicer in the console
+# Also, the tail could reveal more issues with your data than the head
+
+plot_missing(craigslist)
+
+
+# REMOVE LISTINGS WITHOUT A LOCATION
+
+craigslist <- craigslist %>% 
+  filter(!is.na(data.longitude))
+
+# EXTRACT ONLY DISTINCT ROWS (remove duplicates)
+craigslist <- craigslist %>% 
+  distinct()
+
+# EXTRACT ONLY DISTINCT TITLES (remove duplicates)
+craigslist <- craigslist %>% 
+  distinct(titles, .keep_all = TRUE)
+
+craigslist %>% arrange(links) %>% select(links) %>% head()
+
+# REMOVE FIRST PART OF THE URL UP UNTIL "/d/"
+craigslist <- craigslist %>% 
+  mutate(urlextract = sub("https://vancouver.craigslist.org/eby/apa/d/","",links))
+
+
+#REMOVE ANY CHARACTERS AFTER "/"
+craigslist <- craigslist %>% 
+  mutate(urlextract = sub("[///].*","", urlextract))
+
+#SELECT ONLY DISTINCT ROWS
+#craigslist <- craigslist %>% 
+ # distinct(urlextract, .keep_all = TRUE)
+
+#REMOVE URL EXTRACT VECTOR, WE DON'T NEED IT ANYMORE
+craigslist$urlextract <- NULL
+```
+
+Scatterplot of longitude and longitude 
+
+```{r echo=FALSE}
+#Removing locations too far from eby
+#craigslist %>% 
+#  ggmap(x = data.longitude, y = data.latitude) +
+#  geom_point() +
+#  labs(title = "Scatterplot of GPS Coordinates") +
+#  theme_minimal()
+
+```
+```{r include=FALSE}
+#craigslist <- craigslist %>% 
+ # filter(data.longitude > -122.39 
+  #       & data.longitude < -121.86
+   #      & data.latitude > 37.77 
+    #     & data.latitude < 37.9)
+
+# CLEAN DATE
+craigslist$dates <- ymd_hms(craigslist$dates) %>% floor_date(unit="day")
+
+# FEATURE ENGINEER PRICE PER ROOM AS "roomprice"
+craigslist <- craigslist %>% 
+  mutate(roomprice = prices/bedrooms)
+
+# FEATURE ENGINEER PRICE SQFT ROOM AS "sqftprice"
+craigslist <- craigslist %>%
+  filter(sqft > 400 | is.na(sqft)) %>%
+  mutate(sqftprice = prices/sqft)
+
+craigslist <- craigslist %>%
+  filter(bedrooms < 4)
+
+# FACTOR BEDROOMS
+craigslist$bedrooms <- as.factor(craigslist$bedrooms)
+
+#REMOVE SUPER HIGH PRICES
+craigslist <- craigslist %>% 
+  filter(roomprice < 4500)
+```
+
+Looking at a boxplot of the room rate by number of bedrooms
+
+```{r echo=FALSE}
+# BOXPLOT OF DISTRIBUTION
+craigslist %>%
+  ggplot(aes(x = bedrooms, y = roomprice)) +
+  labs(title = "(Price / Rooms) Ratio by number of bedrooms (max 3)") +
+  geom_boxplot() +
+  theme_minimal()
+
+```
+```{r include=FALSE}
+#REMOVE >2 BEDROOMS
+#now reduced max bedrooms to future filtering to max 2.  
+craigslist <- craigslist %>% 
+  filter(as.numeric(bedrooms) < 3)
+
+#CLEAN UP LOCALES
+
+# REMOVE PARENTHESES (FIRST AND LAST CHARACTERS)
+craigslist$locales <- gsub('^.|.$', '', craigslist$locales)
+
+# MAKE EVERYTHING LOWERCASE
+craigslist$locales <- tolower(craigslist$locales)
+
+# REMOVE NA'S
+craigslist <- craigslist %>% 
+  filter(is.na(locales) == FALSE)
+
+unique(craigslist$locales)
+
+#FACTOR LOCALES
+craigslist$locales <- as.factor(craigslist$locales)
+```
+
+```{r echo=FALSE}
+#REVIEW NEIGHBORHOODS
+craigslist %>% 
+  group_by(locales) %>% 
+  select(locales) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+
+#DISTRIBUTION OF PER-ROOM PRICING BY LOCALE
+
+craigslist %>% 
+  group_by(locales) %>%
+  filter(n() >= 5) %>%
+  ggplot(aes(x = reorder(locales, prices, FUN = mean), y=roomprice)) +
+  geom_boxplot(alpha = .8) +
+  coord_cartesian(ylim = c(0,3000)) +
+  labs(x = "Neighborhood", y = "Price Per Room", title = "Price Per Room By Neighborhood", caption = "With over 4 listings per Neighbour (Check count in console each time)") +
+  theme_bw() 
+
+#DISTRIBUTION OF SQFT PRICING BY LOCALE
+
+craigslist %>% 
+  filter(!is.na(sqftprice)) %>%
+  group_by(locales) %>%
+  filter(n() >= 5) %>%
+  ggplot(aes(x = reorder(locales, sqftprice, FUN = median), y=sqftprice)) +
+  geom_boxplot(alpha = .8) +
+  coord_cartesian(ylim = c(0,4)) +
+  labs(x = "Neighborhood", y = "Price Per SQFT", title = "Price Per SQFT By Neighborhood", caption = "With over 4 listings per Neighbour (Check count in console each time)") +
+  theme_bw()
+```
+
+Looking at averages for the dataset.  These values are calculated basis an adjustment to maximum 2 bedrooms.
+
+```{r echo=FALSE}
+#Price per SQFT Average
+"Mean"
+mean(craigslist$sqftprice, na.rm = TRUE)
+"Median"
+median(craigslist$sqftprice, na.rm = TRUE)
+"Max"
+max(craigslist$sqftprice, na.rm = TRUE)
+"Min"
+min(craigslist$sqftprice, na.rm = TRUE)
+
+"Min Listing Price"
+min(craigslist$prices, na.rm = TRUE)
+```
+
+```{r include = FALSE, eval = FALSE}
+#Save listings as seen to filter out in the future
+#seenlistings1 <- as_tibble(craigslist$links)
+#seenlistings2 <- read_csv("craigslistfilter.csv")
+#craigslist <- craigslist %>% filter(!links %in% seenlistings2$value)
+#seenlistings3 <- union(seenlistings1, seenlistings2)
+#write_excel_csv(seenlistings3,"craigslistfilter.csv")
+
+
+#Save/download CSV file as today's date
+#write_excel_csv(craigslist, paste0("rentaldata"," (",format(Sys.time(), "%b-%d-%Y"),")", ".csv"))
+```
+
